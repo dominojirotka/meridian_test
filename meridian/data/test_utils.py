@@ -37,7 +37,7 @@ def _sample_names(prefix: str, n_names: int | None) -> list[str] | None:
   return [prefix + str(n) for n in range(n_names)] if n_names else None
 
 
-def _sample_geos(
+def sample_geos(
     n_geos: int | None, integer_geos: bool = False
 ) -> list[str] | list[int] | None:
   """Generates a list of sample geos."""
@@ -519,6 +519,7 @@ def random_media_da(
     n_media_channels: int,
     seed: int = 0,
     date_format: str = c.DATE_FORMAT,
+    explicit_geo_names: Sequence[str] | None = None,
     explicit_time_index: Sequence[str] | None = None,
     explicit_media_channel_names: Sequence[str] | None = None,
     array_name: str = 'media',
@@ -535,6 +536,7 @@ def random_media_da(
     n_media_channels: Number of media channels
     seed: Random seed used by `np.random.seed()`
     date_format: The date format to use for time coordinate labels
+    explicit_geo_names: If given, ignore `n_geos` and use this as is.
     explicit_time_index: If given, ignore `date_format` and use this as is
     explicit_media_channel_names: If given, ignore `n_media_channels` and use
       this as is
@@ -558,6 +560,11 @@ def random_media_da(
           np.random.normal(5, 5, size=(n_geos, n_media_times, n_media_channels))
       )
   )
+  if explicit_geo_names is None:
+    geos = sample_geos(n_geos, integer_geos)
+  else:
+    geos = explicit_geo_names
+
   if explicit_time_index is None:
     media_time = _sample_times(
         n_times=n_media_times,
@@ -576,7 +583,7 @@ def random_media_da(
       media,
       dims=['geo', 'media_time', channel_variable_name],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': geos,
           'media_time': media_time,
           channel_variable_name: media_channels,
       },
@@ -647,7 +654,7 @@ def random_media_spend_nd_da(
   coords = {}
   if n_geos is not None:
     dims.append('geo')
-    coords['geo'] = _sample_geos(n_geos, integer_geos)
+    coords['geo'] = sample_geos(n_geos, integer_geos)
   if n_times is not None:
     dims.append('time')
     coords['time'] = _sample_times(n_times=n_times)
@@ -719,7 +726,7 @@ def random_controls_da(
       controls,
       dims=['geo', 'time', 'control_variable'],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'time': (
               _sample_times(n_times=n_times, date_format=date_format)
               if explicit_time_index is None
@@ -775,7 +782,7 @@ def random_kpi_da(
       kpi,
       dims=['geo', 'time'],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'time': _sample_times(n_times=n_times),
       },
       name=c.KPI,
@@ -796,7 +803,7 @@ def constant_revenue_per_kpi(
       revenue_per_kpi,
       dims=['geo', 'time'],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'time': _sample_times(n_times=n_times),
       },
       name='revenue_per_kpi',
@@ -815,7 +822,7 @@ def random_population(
   return xr.DataArray(
       population,
       dims=['geo'],
-      coords={'geo': _sample_geos(n_geos, integer_geos)},
+      coords={'geo': sample_geos(n_geos, integer_geos)},
       name='population',
   )
 
@@ -857,7 +864,7 @@ def random_reach_da(
       reach,
       dims=['geo', 'media_time', channel_variable_name],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'media_time': _sample_times(
               n_times=n_media_times, start_date=start_date
           ),
@@ -925,7 +932,7 @@ def random_frequency_da(
       frequency,
       dims=['geo', 'media_time', channel_variable_name],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'media_time': _sample_times(
               n_times=n_media_times, start_date=start_date
           ),
@@ -992,7 +999,7 @@ def random_rf_spend_nd_da(
   coords = {}
   if n_geos is not None:
     dims.append('geo')
-    coords['geo'] = _sample_geos(n_geos, integer_geos)
+    coords['geo'] = sample_geos(n_geos, integer_geos)
   if n_times is not None:
     dims.append('time')
     coords['time'] = _sample_times(n_times=n_times)
@@ -1060,7 +1067,7 @@ def random_non_media_treatments_da(
       non_media_treatments,
       dims=['geo', 'time', 'non_media_channel'],
       coords={
-          'geo': _sample_geos(n_geos, integer_geos),
+          'geo': sample_geos(n_geos, integer_geos),
           'time': (
               _sample_times(n_times=n_times, date_format=date_format)
               if explicit_time_index is None

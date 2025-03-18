@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
+from typing_extensions import Self
 import xarray as xr
 
 __all__ = [
@@ -36,8 +37,9 @@ __all__ = [
 ]
 
 
+# TODO: Refactor the related unit tests to be under DataTensors.
 class DataTensors(tf.experimental.ExtensionType):
-  """Container for data variables arguments of Analyzer methods.
+  """Container for data variable arguments of Analyzer methods.
 
   Attributes:
     media: Optional tensor with dimensions `(n_geos, T, n_media_channels)` for
@@ -59,20 +61,78 @@ class DataTensors(tf.experimental.ExtensionType):
     non_media_treatments: Optional tensor with dimensions `(n_geos, T,
       n_non_media_channels)` for any time dimension `T`.
     controls: Optional tensor with dimensions `(n_geos, n_times, n_controls)`.
-    revenue_per_kpi: Optional tensor with dimensions `(n_geos, n_times)`.
+    revenue_per_kpi: Optional tensor with dimensions `(n_geos, T)` for any time
+      dimension `T`.
   """
 
-  media: Optional[tf.Tensor] = None
-  media_spend: Optional[tf.Tensor] = None
-  reach: Optional[tf.Tensor] = None
-  frequency: Optional[tf.Tensor] = None
-  rf_spend: Optional[tf.Tensor] = None
-  organic_media: Optional[tf.Tensor] = None
-  organic_reach: Optional[tf.Tensor] = None
-  organic_frequency: Optional[tf.Tensor] = None
-  non_media_treatments: Optional[tf.Tensor] = None
-  controls: Optional[tf.Tensor] = None
-  revenue_per_kpi: Optional[tf.Tensor] = None
+  media: Optional[tf.Tensor]
+  media_spend: Optional[tf.Tensor]
+  reach: Optional[tf.Tensor]
+  frequency: Optional[tf.Tensor]
+  rf_spend: Optional[tf.Tensor]
+  organic_media: Optional[tf.Tensor]
+  organic_reach: Optional[tf.Tensor]
+  organic_frequency: Optional[tf.Tensor]
+  non_media_treatments: Optional[tf.Tensor]
+  controls: Optional[tf.Tensor]
+  revenue_per_kpi: Optional[tf.Tensor]
+
+  def __init__(
+      self,
+      media: Optional[tf.Tensor] = None,
+      media_spend: Optional[tf.Tensor] = None,
+      reach: Optional[tf.Tensor] = None,
+      frequency: Optional[tf.Tensor] = None,
+      rf_spend: Optional[tf.Tensor] = None,
+      organic_media: Optional[tf.Tensor] = None,
+      organic_reach: Optional[tf.Tensor] = None,
+      organic_frequency: Optional[tf.Tensor] = None,
+      non_media_treatments: Optional[tf.Tensor] = None,
+      controls: Optional[tf.Tensor] = None,
+      revenue_per_kpi: Optional[tf.Tensor] = None,
+  ):
+    self.media = tf.cast(media, tf.float32) if media is not None else None
+    self.media_spend = (
+        tf.cast(media_spend, tf.float32) if media_spend is not None else None
+    )
+    self.reach = tf.cast(reach, tf.float32) if reach is not None else None
+    self.frequency = (
+        tf.cast(frequency, tf.float32) if frequency is not None else None
+    )
+    self.rf_spend = (
+        tf.cast(rf_spend, tf.float32) if rf_spend is not None else None
+    )
+    self.organic_media = (
+        tf.cast(organic_media, tf.float32)
+        if organic_media is not None
+        else None
+    )
+    self.organic_reach = (
+        tf.cast(organic_reach, tf.float32)
+        if organic_reach is not None
+        else None
+    )
+    self.organic_frequency = (
+        tf.cast(organic_frequency, tf.float32)
+        if organic_frequency is not None
+        else None
+    )
+    self.non_media_treatments = (
+        tf.cast(non_media_treatments, tf.float32)
+        if non_media_treatments is not None
+        else None
+    )
+    self.controls = (
+        tf.cast(controls, tf.float32) if controls is not None else None
+    )
+    self.revenue_per_kpi = (
+        tf.cast(revenue_per_kpi, tf.float32)
+        if revenue_per_kpi is not None
+        else None
+    )
+
+  def __validate__(self):
+    self._validate_n_dims()
 
   def total_spend(self) -> tf.Tensor | None:
     """Returns the total spend tensor.
@@ -88,6 +148,248 @@ class DataTensors(tf.experimental.ExtensionType):
     if self.rf_spend is not None:
       spend_tensors.append(self.rf_spend)
     return tf.concat(spend_tensors, axis=-1) if spend_tensors else None
+
+  def get_modified_times(self, meridian: model.Meridian) -> int | None:
+    """Returns `n_times` of any tensor where `n_times` has been modified.
+
+    This method compares the time dimensions of the attributes in the
+    `DataTensors` object with the corresponding tensors in the `meridian`
+    object. If any of the time dimensions are different, then this method
+    returns the modified number of time periods of the tensor in the
+    `DataTensors` object. If all time dimensions are the same, returns `None`.
+
+    Args:
+      meridian: A Meridian object to validate against and get the original data
+        tensors from.
+
+    Returns:
+      The `n_times` of any tensor where `n_times` is different from the times
+      of the corresponding tensor in the `meridian` object. If all time
+      dimensions are the same, returns `None`.
+    """
+    for field in self._tf_extension_type_fields():
+      new_tensor = getattr(self, field.name)
+      old_tensor = getattr(meridian.input_data, field.name)
+      # The time dimension is always the second dimension, except for when spend
+      # data is provided with only one dimension of (n_channels).
+      if (
+          new_tensor is not None
+          and old_tensor is not None
+          and new_tensor.ndim > 1
+          and new_tensor.shape[1] != old_tensor.shape[1]
+      ):
+        return new_tensor.shape[1]
+    return None
+
+  def validate_and_fill_missing_data(
+      self,
+      required_tensors_names: Sequence[str],
+      meridian: model.Meridian,
+      allow_modified_times: bool = True,
+  ) -> Self:
+    """Fills missing data tensors with their original values from the model.
+
+    This method uses the collection of data tensors set in the DataTensor class
+    and fills in the missing tensors with their original values from the
+    Meridian object that is passed in. For example, if `required_tensors_names =
+    ["media", "reach", "frequency"]` and only `media` is set in the DataTensors
+    class, then this method will output a new DataTensors object with the
+    `media` value in this object plus the values of the `reach` and `frequency`
+    from the `meridian` object.
+
+    Args:
+      required_tensors_names: A sequence of data tensors names to validate and
+        fill in with the original values from the `meridian` object.
+      meridian: The Meridian object to validate against and get the original
+        data tensors from.
+      allow_modified_times: A boolean flag indicating whether to allow modified
+        time dimensions in the new data tensors. If False, an error will be
+        raised if the time dimensions of any tensor is modified.
+
+    Returns:
+      A `DataTensors` container with the original values from the Meridian
+      object filled in for the missing data tensors.
+    """
+    self._validate_correct_variables_filled(required_tensors_names, meridian)
+    self._validate_geo_dims(required_tensors_names, meridian)
+    self._validate_channel_dims(required_tensors_names, meridian)
+    if allow_modified_times:
+      self._validate_time_dims_flexible_times(required_tensors_names, meridian)
+    else:
+      self._validate_time_dims(required_tensors_names, meridian)
+
+    return self._fill_default_values(required_tensors_names, meridian)
+
+  def _validate_n_dims(self):
+    """Raises an error if the tensors have the wrong number of dimensions."""
+    for field in self._tf_extension_type_fields():
+      tensor = getattr(self, field.name)
+      if tensor is None:
+        continue
+      if field.name == constants.REVENUE_PER_KPI:
+        _check_n_dims(tensor, field.name, 2)
+      elif field.name in [constants.MEDIA_SPEND, constants.RF_SPEND]:
+        if tensor.ndim not in [1, 3]:
+          raise ValueError(
+              f"New `{field.name}` must have 1 or 3 dimensions. Found"
+              f" {tensor.ndim} dimensions."
+          )
+      else:
+        _check_n_dims(tensor, field.name, 3)
+
+  def _validate_correct_variables_filled(
+      self, required_variables: Sequence[str], meridian: model.Meridian
+  ):
+    """Validates that the correct variables are filled.
+
+    Args:
+      required_variables: A sequence of data tensors names that are required to
+        be filled in.
+      meridian: The Meridian object to validate against.
+
+    Raises:
+      ValueError: If an attribute exists in the `DataTensors` object that is not
+        in the `meridian` object, it is not allowed to be used in analysis.
+      Warning: If an attribute exists in the `DataTensors` object that is not in
+        the `required_variables` list, it will be ignored.
+    """
+    for field in self._tf_extension_type_fields():
+      tensor = getattr(self, field.name)
+      if tensor is None:
+        continue
+      if field.name not in required_variables:
+        warnings.warn(
+            f"A `{field.name}` value was passed in the `new_data` argument. "
+            "This is not supported and will be ignored."
+        )
+      if field.name in required_variables:
+        if getattr(meridian.input_data, field.name) is None:
+          raise ValueError(
+              f"New `{field.name}` is not allowed because the input data to the"
+              f" Meridian model does not contain `{field.name}`."
+          )
+
+  def _validate_geo_dims(
+      self, required_fields: Sequence[str], meridian: model.Meridian
+  ):
+    """Validates the geo dimension of the specified data variables."""
+    for var_name in required_fields:
+      new_tensor = getattr(self, var_name)
+      if new_tensor is not None and new_tensor.shape[0] != meridian.n_geos:
+        # Skip spend data with only 1 dimension of (n_channels).
+        if new_tensor.ndim == 1:
+          continue
+        raise ValueError(
+            f"New `{var_name}` is expected to have {meridian.n_geos}"
+            f" geos. Found {new_tensor.shape[0]} geos."
+        )
+
+  def _validate_channel_dims(
+      self, required_fields: Sequence[str], meridian: model.Meridian
+  ):
+    """Validates the channel dimension of the specified data variables."""
+    for var_name in required_fields:
+      if var_name == constants.REVENUE_PER_KPI:
+        continue
+      new_tensor = getattr(self, var_name)
+      old_tensor = getattr(meridian.input_data, var_name)
+      if new_tensor is not None:
+        assert old_tensor is not None
+        if new_tensor.shape[-1] != old_tensor.shape[-1]:
+          raise ValueError(
+              f"New `{var_name}` is expected to have {old_tensor.shape[-1]}"
+              f" channels. Found {new_tensor.shape[-1]} channels."
+          )
+
+  def _validate_time_dims(
+      self, required_fields: Sequence[str], meridian: model.Meridian
+  ):
+    """Validates the time dimension of the specified data variables."""
+    for var_name in required_fields:
+      new_tensor = getattr(self, var_name)
+      old_tensor = getattr(meridian.input_data, var_name)
+
+      # Skip spend data with only 1 dimension of (n_channels).
+      if new_tensor is not None and new_tensor.ndim == 1:
+        continue
+
+      if new_tensor is not None:
+        assert old_tensor is not None
+        if new_tensor.shape[1] != old_tensor.shape[1]:
+          raise ValueError(
+              f"New `{var_name}` is expected to have {old_tensor.shape[1]}"
+              f" time periods. Found {new_tensor.shape[1]} time periods."
+          )
+
+  def _validate_time_dims_flexible_times(
+      self, required_fields: Sequence[str], meridian: model.Meridian
+  ):
+    """Validates the time dimension for the flexible times case."""
+    new_n_times = self.get_modified_times(meridian)
+    # If no times were modified, then there is nothing more to validate.
+    if new_n_times is None:
+      return
+
+    missing_params = []
+    for var_name in required_fields:
+      new_tensor = getattr(self, var_name)
+      old_tensor = getattr(meridian.input_data, var_name)
+
+      if old_tensor is None:
+        continue
+      # Skip spend data with only 1 dimension of (n_channels).
+      if new_tensor is not None and new_tensor.ndim == 1:
+        continue
+
+      if new_tensor is None:
+        missing_params.append(var_name)
+      elif new_tensor.shape[1] != new_n_times:
+        raise ValueError(
+            "If the time dimension of any variable in `new_data` is "
+            "modified, then all variables must be provided with the same "
+            f"number of time periods. `{var_name}` has {new_tensor.shape[1]} "
+            "time periods, which does not match the modified number of time "
+            f"periods, {new_n_times}.",
+        )
+
+    if missing_params:
+      raise ValueError(
+          "If the time dimension of a variable in `new_data` is modified,"
+          " then all variables must be provided in `new_data`."
+          f" The following variables are missing: `{missing_params}`."
+      )
+
+  def _fill_default_values(
+      self, required_fields: Sequence[str], meridian: model.Meridian
+  ) -> Self:
+    """Fills default values and returns a new DataTensors object."""
+    output = {}
+    for field in self._tf_extension_type_fields():
+      var_name = field.name
+      if var_name not in required_fields:
+        continue
+
+      if hasattr(meridian.media_tensors, var_name):
+        old_tensor = getattr(meridian.media_tensors, var_name)
+      elif hasattr(meridian.rf_tensors, var_name):
+        old_tensor = getattr(meridian.rf_tensors, var_name)
+      elif hasattr(meridian.organic_media_tensors, var_name):
+        old_tensor = getattr(meridian.organic_media_tensors, var_name)
+      elif hasattr(meridian.organic_rf_tensors, var_name):
+        old_tensor = getattr(meridian.organic_rf_tensors, var_name)
+      elif var_name == constants.NON_MEDIA_TREATMENTS:
+        old_tensor = meridian.non_media_treatments
+      elif var_name == constants.CONTROLS:
+        old_tensor = meridian.controls
+      elif var_name == constants.REVENUE_PER_KPI:
+        old_tensor = meridian.revenue_per_kpi
+      else:
+        continue
+
+      new_tensor = getattr(self, var_name)
+      output[var_name] = new_tensor if new_tensor is not None else old_tensor
+
+    return DataTensors(**output)
 
 
 class DistributionTensors(tf.experimental.ExtensionType):
@@ -209,60 +511,6 @@ def _check_n_dims(tensor: tf.Tensor, name: str, n_dims: int):
     )
 
 
-def _check_shape_matches(
-    t1: tf.Tensor | None = None,
-    t1_name: str = "",
-    t2: tf.Tensor | None = None,
-    t2_name: str = "",
-    t2_shape: tf.TensorShape | None = None,
-):
-  """Raises an error if dimensions of a tensor don't match the correct shape.
-
-  When `t2_shape` is provided, the dimensions are assumed to be `(n_geos,
-  n_times, n_channels)` or `(n_geos, n_times)`.
-
-  Args:
-    t1: The first tensor to check.
-    t1_name: The name of the first tensor to check.
-    t2: Optional second tensor to check. If None, `t2_shape` must be provided.
-    t2_name: The name of the second tensor to check.
-    t2_shape: Optional shape of the second tensor to check. If None, `t2` must
-      be provided.
-  """
-  if t1 is not None and t2 is not None and t1.shape != t2.shape:
-    raise ValueError(f"{t1_name}.shape must match {t2_name}.shape.")
-  if t1 is not None and t2_shape is not None and t1.shape != t2_shape:
-    _check_n_dims(t1, t1_name, t2_shape.rank)
-    if t1.shape[0] != t2_shape[0]:
-      raise ValueError(
-          f"New `{t1_name}` is expected to have {t2_shape[0]} geos. "
-          f"Found {t1.shape[0]} geos."
-      )
-    if t1.shape[1] != t2_shape[1]:
-      raise ValueError(
-          f"New `{t1_name}` is expected to have {t2_shape[1]} time periods. "
-          f"Found {t1.shape[1]} time periods."
-      )
-    if t1.ndim == 3 and t1.shape[2] != t2_shape[2]:
-      raise ValueError(
-          f"New `{t1_name}` is expected to have third dimension of size "
-          f"{t2_shape[2]}. Actual size is {t1.shape[2]}."
-      )
-
-
-def _check_spend_shape_matches(
-    spend: tf.Tensor,
-    spend_name: str,
-    shapes: Sequence[tf.TensorShape],
-):
-  """Raises an error if dimensions of spend don't match expected shape."""
-  if spend is not None and spend.shape not in shapes:
-    raise ValueError(
-        f"{spend_name}.shape: {spend.shape} must match either {shapes[0]} or"
-        + f" {shapes[1]}."
-    )
-
-
 def _is_bool_list(l: Sequence[Any]) -> bool:
   """Returns True if the list contains only booleans."""
   return all(isinstance(item, bool) for item in l)
@@ -280,7 +528,21 @@ def _validate_selected_times(
     arg_name: str,
     comparison_arg_name: str,
 ):
-  """Raises an error if selected_times is invalid."""
+  """Raises an error if selected_times is invalid.
+
+  This checks that the `selected_times` argument is a list of strings or a list
+  of booleans. If it is a list of strings, then each string must match the name
+  of a time period coordinate in `input_times`. If it is a list of booleans,
+  then it must have the same number of elements as `n_times`.
+
+  Args:
+    selected_times: Optional list of times to validate.
+    input_times: Time dimension coordinates from `InputData.time` or
+      `InputData.media_time`.
+    n_times: The number of time periods in the tensor.
+    arg_name: The name of the argument being validated.
+    comparison_arg_name: The name of the argument being compared to.
+  """
   if not selected_times:
     return
   if _is_bool_list(selected_times):
@@ -301,59 +563,23 @@ def _validate_selected_times(
     )
 
 
-def _validate_new_data_dims(
-    new_data: DataTensors, used_treatment_var_names: Sequence[str]
-):
-  for var_name in used_treatment_var_names:
-    tensor = getattr(new_data, var_name)
-    if tensor is not None:
-      _check_n_dims(tensor, var_name, 3)
-  if new_data.revenue_per_kpi is not None:
-    _check_n_dims(new_data.revenue_per_kpi, constants.REVENUE_PER_KPI, 2)
-
-
-def _is_flexible_time_scenario(
-    new_data: DataTensors,
-    used_var_names: Sequence[str],
-    used_vars_names_and_times: Sequence[tuple[tf.Tensor | None, str, int]],
-):
-  """Checks if the time dimension of a variable in new_data is modified."""
-  if any(
-      (var is not None and var.shape[1] != time_dim)
-      for var, _, time_dim in used_vars_names_and_times
-  ):
-    missing_vars = []
-    for var, var_name, _ in used_vars_names_and_times:
-      if var is None:
-        missing_vars.append(var_name)
-    if missing_vars:
-      raise ValueError(
-          "If the time dimension of a variable in `new_data` is modified,"
-          " then all variables must be provided in `new_data`."
-          f" The following variables are missing: `{missing_vars}`."
-      )
-    new_n_media_times = getattr(new_data, used_var_names[0]).shape[1]  # pytype: disable=attribute-error
-    for var, var_name, _ in used_vars_names_and_times:
-      # pytype: disable=attribute-error
-      if var.shape[1] != new_n_media_times:
-        raise ValueError(
-            "If the time dimension of any variable in `new_data` is"
-            " modified, then all variables must be provided with the same"
-            f" number of time periods. `new_data.{var_name}` has"
-            f" {var.shape[1]} time periods and does not match"
-            f" `new_data.{used_var_names[0]}` which has"
-            f" {new_n_media_times} time periods."
-        )
-      # pytype: enable=attribute-error
-    return True
-  else:
-    return False
-
-
-def _validate_selected_times_flexible_time(
+def _validate_flexible_selected_times(
     selected_times: Sequence[str] | Sequence[bool] | None,
+    media_selected_times: Sequence[str] | Sequence[bool] | None,
     new_n_media_times: int,
 ):
+  """Raises an error if selected times or media selected times is invalid.
+
+  This checks that the `selected_times` and `media_selected_times` arguments
+  are lists of booleans with the same number of elements as `new_n_media_times`.
+  This is only relevant if the time dimension of any of the variables in
+  `new_data` used in the analysis is modified.
+
+  Args:
+    selected_times: Optional list of times to validate.
+    media_selected_times: Optional list of media times to validate.
+    new_n_media_times: The number of time periods in the new data.
+  """
   if selected_times and (
       not _is_bool_list(selected_times)
       or len(selected_times) != new_n_media_times
@@ -367,11 +593,6 @@ def _validate_selected_times_flexible_time(
         " the new data."
     )
 
-
-def _validate_media_selected_times_flexible_time(
-    media_selected_times: Sequence[str] | Sequence[bool] | None,
-    new_n_media_times: int,
-):
   if media_selected_times and (
       not _is_bool_list(media_selected_times)
       or len(media_selected_times) != new_n_media_times
@@ -390,18 +611,26 @@ def _scale_tensors_by_multiplier(
     data: DataTensors,
     multiplier: float,
     by_reach: bool,
+    non_media_treatments_baseline: tf.Tensor | None = None,
 ) -> DataTensors:
   """Get scaled tensors for incremental outcome calculation.
 
   Args:
-    data: DataTensors object containing the optional tensors to scale: `media`,
-      `reach`, `frequency`.
+    data: DataTensors object containing the optional tensors to scale. Only
+      `media`, `reach`, `frequency`, `organic_media`, `organic_reach`,
+      `organic_frequency`, `non_media_treatments` are scaled. The other tensors
+      remain unchanged.
     multiplier: Float indicating the factor to scale tensors by.
     by_reach: Boolean indicating whether to scale reach or frequency when rf
       data is available.
+    non_media_treatments_baseline: Optional tensor to overwrite
+      `data.non_media_treatments` in the output. Used to compute the
+      conterfactual values for incremental outcome calculation. If not used, the
+      unmodified `data.non_media_treatments` tensor is returned in the output.
 
   Returns:
-    A `DataTensors` object containing scaled tensor parameters.
+    A `DataTensors` object containing scaled tensor parameters. The original
+    tensors that should not be scaled remain unchanged.
   """
   incremented_data = {}
   if data.media is not None:
@@ -413,6 +642,32 @@ def _scale_tensors_by_multiplier(
     else:
       incremented_data[constants.REACH] = data.reach
       incremented_data[constants.FREQUENCY] = data.frequency * multiplier
+  if data.organic_media is not None:
+    incremented_data[constants.ORGANIC_MEDIA] = data.organic_media * multiplier
+  if data.organic_reach is not None and data.organic_frequency is not None:
+    if by_reach:
+      incremented_data[constants.ORGANIC_REACH] = (
+          data.organic_reach * multiplier
+      )
+      incremented_data[constants.ORGANIC_FREQUENCY] = data.organic_frequency
+    else:
+      incremented_data[constants.ORGANIC_REACH] = data.organic_reach
+      incremented_data[constants.ORGANIC_FREQUENCY] = (
+          data.organic_frequency * multiplier
+      )
+  if non_media_treatments_baseline is not None:
+    incremented_data[constants.NON_MEDIA_TREATMENTS] = (
+        non_media_treatments_baseline
+    )
+  else:
+    incremented_data[constants.NON_MEDIA_TREATMENTS] = data.non_media_treatments
+
+  # Include the original data that does not get scaled.
+  incremented_data[constants.MEDIA_SPEND] = data.media_spend
+  incremented_data[constants.RF_SPEND] = data.rf_spend
+  incremented_data[constants.CONTROLS] = data.controls
+  incremented_data[constants.REVENUE_PER_KPI] = data.revenue_per_kpi
+
   return DataTensors(**incremented_data)
 
 
@@ -539,43 +794,6 @@ class Analyzer:
     # tf.function computation graphs: it should be frozen for no more internal
     # states mutation before those graphs execute.
     self._meridian.populate_cached_properties()
-
-  def _validate_new_data_geo_dims(
-      self,
-      new_data: DataTensors,
-      var_names: Sequence[str],
-  ):
-    """Validates the geo dimension of the chosen variables from `new_data`."""
-    for var_name in var_names:
-      var = getattr(new_data, var_name)
-      if var is not None:
-        if var.shape[0] != self._meridian.n_geos:
-          raise ValueError(
-              f"New `{var_name}` is expected to have"
-              f" {self._meridian.n_geos} geos. Found {var.shape[0]} geos."
-          )
-
-  def _validate_new_data_n_channels(
-      self,
-      new_data: DataTensors,
-      var_names: Sequence[str],
-  ):
-    """Validates number of channels in the chosen variables from `new_data`."""
-    for var_name in var_names:
-      if getattr(new_data, var_name) is not None:
-        new_data_var = getattr(new_data, var_name)
-        input_data_var = getattr(self._meridian.input_data, var_name)
-        if input_data_var is None:
-          raise ValueError(
-              f"`new_data.{var_name}` not allowed because the input data does"
-              f" not have `{var_name}`."
-          )
-        elif new_data_var.shape[-1] != input_data_var.shape[-1]:
-          raise ValueError(
-              f"New `{var_name}` is expected to have"
-              f" {input_data_var.shape[-1]} channels. Found"
-              f" {new_data_var.shape[-1]} channels."
-          )
 
   @tf.function(jit_compile=True)
   def _get_kpi_means(
@@ -740,102 +958,6 @@ class Analyzer:
         )
         .reset_index()
     )
-
-  def _fill_missing_data_tensors(
-      self,
-      new_data: DataTensors | None,
-      required_tensors_names: Sequence[str],
-  ) -> DataTensors:
-    """Fills missing data tensors with their original values.
-
-    This method takes a collection of new data tensors set by the user and
-    fills in the missing tensors with their original values from the Meridian
-    object. For example, if `required_tensors_names = ["media", "reach",
-    "frequency"]` and the user sets only `new_data.media`, then this method will
-    output `new_data.media` and the values of the `reach` and `frequency` from
-    the Meridian object.
-
-    Args:
-      new_data: A `DataTensors` container with optional tensors set by the user.
-      required_tensors_names: A sequence of data tensors names to fill in
-        `new_data` with their original values from the Meridian object.
-
-    Returns:
-      A `DataTensors` container. For every tensor from the
-      `required_tensors_names` list, the output contains the tensor from
-      `new_data` if it is not `None`, otherwise the corresponding tensor from
-      the Meridian object.
-    """
-    if new_data is None:
-      new_data = DataTensors()
-    output = {}
-    if constants.MEDIA in required_tensors_names:
-      output[constants.MEDIA] = (
-          new_data.media
-          if new_data.media is not None
-          else self._meridian.media_tensors.media
-      )
-    if constants.MEDIA_SPEND in required_tensors_names:
-      output[constants.MEDIA_SPEND] = (
-          new_data.media_spend
-          if new_data.media_spend is not None
-          else self._meridian.media_tensors.media_spend
-      )
-    if constants.REACH in required_tensors_names:
-      output[constants.REACH] = (
-          new_data.reach
-          if new_data.reach is not None
-          else self._meridian.rf_tensors.reach
-      )
-    if constants.FREQUENCY in required_tensors_names:
-      output[constants.FREQUENCY] = (
-          new_data.frequency
-          if new_data.frequency is not None
-          else self._meridian.rf_tensors.frequency
-      )
-    if constants.RF_SPEND in required_tensors_names:
-      output[constants.RF_SPEND] = (
-          new_data.rf_spend
-          if new_data.rf_spend is not None
-          else self._meridian.rf_tensors.rf_spend
-      )
-    if constants.ORGANIC_MEDIA in required_tensors_names:
-      output[constants.ORGANIC_MEDIA] = (
-          new_data.organic_media
-          if new_data.organic_media is not None
-          else self._meridian.organic_media_tensors.organic_media
-      )
-    if constants.ORGANIC_REACH in required_tensors_names:
-      output[constants.ORGANIC_REACH] = (
-          new_data.organic_reach
-          if new_data.organic_reach is not None
-          else self._meridian.organic_rf_tensors.organic_reach
-      )
-    if constants.ORGANIC_FREQUENCY in required_tensors_names:
-      output[constants.ORGANIC_FREQUENCY] = (
-          new_data.organic_frequency
-          if new_data.organic_frequency is not None
-          else self._meridian.organic_rf_tensors.organic_frequency
-      )
-    if constants.NON_MEDIA_TREATMENTS in required_tensors_names:
-      output[constants.NON_MEDIA_TREATMENTS] = (
-          new_data.non_media_treatments
-          if new_data.non_media_treatments is not None
-          else self._meridian.non_media_treatments
-      )
-    if constants.CONTROLS in required_tensors_names:
-      output[constants.CONTROLS] = (
-          new_data.controls
-          if new_data.controls is not None
-          else self._meridian.controls
-      )
-    if constants.REVENUE_PER_KPI in required_tensors_names:
-      output[constants.REVENUE_PER_KPI] = (
-          new_data.revenue_per_kpi
-          if new_data.revenue_per_kpi is not None
-          else self._meridian.revenue_per_kpi
-      )
-    return DataTensors(**output)
 
   def _get_scaled_data_tensors(
       self,
@@ -1330,55 +1452,24 @@ class Analyzer:
           f"sample_{dist_type}() must be called prior to calling"
           " `expected_outcome()`."
       )
-    if new_data is not None:
-      if new_data.revenue_per_kpi is not None:
-        warnings.warn(
-            "A `revenue_per_kpi` value was passed in the `new_data` argument to"
-            " the `expected_outcome()` method. This is currently not supported"
-            " and will be ignored."
-        )
-      _check_shape_matches(
-          new_data.controls, "new_controls", self._meridian.controls, "controls"
-      )
-      _check_shape_matches(
-          new_data.media,
-          "new_media",
-          self._meridian.media_tensors.media,
-          "media",
-      )
-      _check_shape_matches(
-          new_data.reach, "new_reach", self._meridian.rf_tensors.reach, "reach"
-      )
-      _check_shape_matches(
-          new_data.frequency,
-          "new_frequency",
-          self._meridian.rf_tensors.frequency,
-          "frequency",
-      )
-      _check_shape_matches(
-          new_data.organic_media,
-          "new_organic_media",
-          self._meridian.organic_media_tensors.organic_media,
-          "organic_media",
-      )
-      _check_shape_matches(
-          new_data.organic_reach,
-          "new_organic_reach",
-          self._meridian.organic_rf_tensors.organic_reach,
-          "organic_reach",
-      )
-      _check_shape_matches(
-          new_data.organic_frequency,
-          "new_organic_frequency",
-          self._meridian.organic_rf_tensors.organic_frequency,
-          "organic_frequency",
-      )
-      _check_shape_matches(
-          new_data.non_media_treatments,
-          "new_non_media_treatments",
-          self._meridian.non_media_treatments,
-          "non_media_treatments",
-      )
+    if new_data is None:
+      new_data = DataTensors()
+
+    required_fields = [
+        constants.CONTROLS,
+        constants.MEDIA,
+        constants.REACH,
+        constants.FREQUENCY,
+        constants.ORGANIC_MEDIA,
+        constants.ORGANIC_REACH,
+        constants.ORGANIC_FREQUENCY,
+        constants.NON_MEDIA_TREATMENTS,
+    ]
+    filled_tensors = new_data.validate_and_fill_missing_data(
+        required_tensors_names=required_fields,
+        meridian=self._meridian,
+        allow_modified_times=False,
+    )
 
     params = (
         self._meridian.inference_data.posterior
@@ -1388,7 +1479,7 @@ class Analyzer:
     # We always compute the expected outcome of all channels, including non-paid
     # channels.
     data_tensors = self._get_scaled_data_tensors(
-        new_data=new_data,
+        new_data=filled_tensors,
         include_non_paid_channels=True,
     )
 
@@ -1663,6 +1754,7 @@ class Analyzer:
       aggregate_times: bool = True,
       inverse_transform_outcome: bool = True,
       use_kpi: bool = False,
+      by_reach: bool = True,
       include_non_paid_channels: bool = True,
       batch_size: int = constants.DEFAULT_BATCH_SIZE,
   ) -> tf.Tensor:
@@ -1678,10 +1770,11 @@ class Analyzer:
     by `media_selected_times`. Similarly, `Media_0` means that media execution
     is multiplied by `scaling_factor0` (0.0 by default) for these time periods.
 
-    For channels with reach and frequency data, the frequency is held fixed
-    while the reach is scaled. "Outcome" refers to either `revenue` if
-    `use_kpi=False`, or `kpi` if `use_kpi=True`. When `revenue_per_kpi` is not
-    defined, `use_kpi` cannot be False.
+    For channels with reach and frequency data, either reach or frequency is
+    held fixed while the other is scaled, depending on the `by_reach` argument.
+    "Outcome" refers to either `revenue` if `use_kpi=False`, or `kpi` if
+    `use_kpi=True`. When `revenue_per_kpi` is not defined, `use_kpi` cannot be
+    False.
 
     If `new_data=None`, this method computes incremental outcome using `media`,
     `reach`, `frequency`, `organic_media`, `organic_reach`, `organic_frequency`,
@@ -1738,7 +1831,7 @@ class Analyzer:
         default, all geos are included.
       selected_times: Optional list containing either a subset of dates to
         include or booleans with length equal to the number of time periods in
-        the `new_XXX` args, if provided. The incremental outcome corresponds to
+        the `new_data` args, if provided. The incremental outcome corresponds to
         incremental KPI generated during the `selected_times` arg by media
         executed during the `media_selected_times` arg. Note that if
         `use_kpi=False`, then `selected_times` can only include the time periods
@@ -1771,6 +1864,10 @@ class Analyzer:
         otherwise the expected revenue `(kpi * revenue_per_kpi)` is calculated.
         It is required that `use_kpi = True` if `revenue_per_kpi` data is not
         available or if `inverse_transform_outcome = False`.
+      by_reach: Boolean. If `True`, then the incremental outcome is calculated
+        by scaling the reach and holding the frequency constant. If `False`,
+        then the incremental outcome is calculated by scaling the frequency and
+        holding the reach constant. Only used for channels with RF data.
       include_non_paid_channels: Boolean. If `True`, then non-media treatments
         and organic effects are included in the calculation. If `False`, then
         only the paid media and RF effects are included.
@@ -1825,176 +1922,61 @@ class Analyzer:
     if new_data is None:
       new_data = DataTensors()
 
-    if new_data.controls is not None:
-      warnings.warn(
-          "A `controls` value was passed in the `new_data` argument to the"
-          " `incremental_outcome()` method. This has no effect on the output"
-          " and will be ignored."
-      )
-
-    all_media_time_var_names = [
+    required_params = [
         constants.MEDIA,
         constants.REACH,
         constants.FREQUENCY,
-    ]
-    if include_non_paid_channels:
-      all_media_time_var_names += [
-          constants.ORGANIC_MEDIA,
-          constants.ORGANIC_REACH,
-          constants.ORGANIC_FREQUENCY,
-      ]
-
-    all_var_names = all_media_time_var_names + [
+        constants.ORGANIC_MEDIA,
+        constants.ORGANIC_REACH,
+        constants.ORGANIC_FREQUENCY,
+        constants.NON_MEDIA_TREATMENTS,
         constants.REVENUE_PER_KPI,
     ]
-    if include_non_paid_channels:
-      all_var_names += [
-          constants.NON_MEDIA_TREATMENTS,
-      ]
-
-    used_media_time_var_names = [
-        var_name
-        for var_name in all_media_time_var_names
-        if getattr(mmm.input_data, var_name) is not None
-    ]
-
-    used_treatment_var_names = used_media_time_var_names.copy()
-    if (
-        include_non_paid_channels
-        and mmm.input_data.non_media_treatments is not None
-    ):
-      used_treatment_var_names += [
-          constants.NON_MEDIA_TREATMENTS,
-      ]
-
-    used_var_names = (
-        used_treatment_var_names + [constants.REVENUE_PER_KPI]
-        if mmm.input_data.revenue_per_kpi is not None
-        else used_treatment_var_names
+    data_tensors = new_data.validate_and_fill_missing_data(
+        required_tensors_names=required_params, meridian=self._meridian
     )
+    new_n_media_times = data_tensors.get_modified_times(self._meridian)
 
-    for var_name in all_var_names:
-      if (
-          getattr(new_data, var_name) is not None
-          and var_name not in used_var_names
-      ):
-        raise ValueError(
-            f"The `new_data` argument contains a variable `{var_name}` that is"
-            " not used by the model. Please remove this variable from"
-            " `new_data`."
-        )
-
-    _validate_new_data_dims(
-        new_data=new_data, used_treatment_var_names=used_treatment_var_names
-    )
-    self._validate_new_data_geo_dims(
-        new_data=new_data, var_names=used_var_names
-    )
-    self._validate_new_data_n_channels(
-        new_data=new_data,
-        var_names=used_treatment_var_names,
-    )
-
-    used_vars_names_and_times = [
-        (getattr(new_data, var_name), var_name, mmm.n_media_times)
-        for var_name in used_media_time_var_names
-    ]
-    if mmm.input_data.non_media_treatments is not None:
-      used_vars_names_and_times.append(
-          (
-              new_data.non_media_treatments,
-              constants.NON_MEDIA_TREATMENTS,
-              mmm.n_times,
-          ),
-      )
-    if mmm.input_data.revenue_per_kpi is not None:
-      used_vars_names_and_times.append(
-          (
-              new_data.revenue_per_kpi,
-              constants.REVENUE_PER_KPI,
-              mmm.n_times,
-          ),
-      )
-
-    use_flexible_time = _is_flexible_time_scenario(
-        new_data=new_data,
-        used_var_names=used_var_names,
-        used_vars_names_and_times=used_vars_names_and_times,
-    )
-    new_n_media_times = (
-        getattr(new_data, used_var_names[0]).shape[1]  # pytype: disable=attribute-error
-        if use_flexible_time
-        else mmm.n_media_times
-    )
-
-    if use_flexible_time:
-      _validate_selected_times_flexible_time(
+    if new_n_media_times is None:
+      new_n_media_times = mmm.n_media_times
+      _validate_selected_times(
           selected_times=selected_times,
-          new_n_media_times=new_n_media_times,
+          input_times=mmm.input_data.time,
+          n_times=mmm.n_times,
+          arg_name="selected_times",
+          comparison_arg_name="the input data",
       )
-      _validate_media_selected_times_flexible_time(
-          media_selected_times=media_selected_times,
-          new_n_media_times=new_n_media_times,
-      )
-
-    # Set default values for optional media arguments.
-    data_tensors = self._fill_missing_data_tensors(
-        new_data,
-        [
-            constants.MEDIA,
-            constants.REACH,
-            constants.FREQUENCY,
-            constants.ORGANIC_MEDIA,
-            constants.ORGANIC_REACH,
-            constants.ORGANIC_FREQUENCY,
-            constants.NON_MEDIA_TREATMENTS,
-            constants.REVENUE_PER_KPI,
-        ],
-    )
-    if media_selected_times is None:
-      media_selected_times = [True] * new_n_media_times
-    else:
       _validate_selected_times(
           selected_times=media_selected_times,
           input_times=mmm.input_data.media_time,
-          n_times=new_n_media_times,
+          n_times=mmm.n_media_times,
           arg_name="media_selected_times",
           comparison_arg_name="the media tensors",
       )
+    else:
+      _validate_flexible_selected_times(
+          selected_times=selected_times,
+          media_selected_times=media_selected_times,
+          new_n_media_times=new_n_media_times,
+      )
+    if media_selected_times is None:
+      media_selected_times = [True] * new_n_media_times
+    else:
       if all(isinstance(time, str) for time in media_selected_times):
         media_selected_times = [
             x in media_selected_times for x in mmm.input_data.media_time
         ]
     non_media_selected_times = media_selected_times[-mmm.n_times :]
 
-    # Set counterfactual media and reach tensors based on the scaling factors
-    # and the media selected times.
+    # Set counterfactual tensors based on the scaling factors and the media
+    # selected times.
     counterfactual0 = (
         1 + (scaling_factor0 - 1) * np.array(media_selected_times)
     )[:, None]
     counterfactual1 = (
         1 + (scaling_factor1 - 1) * np.array(media_selected_times)
     )[:, None]
-    new_media0 = (
-        None
-        if data_tensors.media is None
-        else data_tensors.media * counterfactual0
-    )
-    new_reach0 = (
-        None
-        if data_tensors.reach is None
-        else data_tensors.reach * counterfactual0
-    )
-    new_organic_media0 = (
-        None
-        if data_tensors.organic_media is None
-        else data_tensors.organic_media * counterfactual0
-    )
-    new_organic_reach0 = (
-        None
-        if data_tensors.organic_reach is None
-        else data_tensors.organic_reach * counterfactual0
-    )
+
     if data_tensors.non_media_treatments is not None:
       new_non_media_treatments0 = _compute_non_media_baseline(
           non_media_treatments=data_tensors.non_media_treatments,
@@ -2003,55 +1985,23 @@ class Analyzer:
       )
     else:
       new_non_media_treatments0 = None
-    new_media1 = (
-        None
-        if data_tensors.media is None
-        else data_tensors.media * counterfactual1
+
+    incremented_data0 = _scale_tensors_by_multiplier(
+        data=data_tensors,
+        multiplier=counterfactual0,
+        by_reach=by_reach,
+        non_media_treatments_baseline=new_non_media_treatments0,
     )
-    new_reach1 = (
-        None
-        if data_tensors.reach is None
-        else data_tensors.reach * counterfactual1
+    incremented_data1 = _scale_tensors_by_multiplier(
+        data=data_tensors, multiplier=counterfactual1, by_reach=by_reach
     )
-    new_organic_media1 = (
-        None
-        if data_tensors.organic_media is None
-        else data_tensors.organic_media * counterfactual1
-    )
-    new_organic_reach1 = (
-        None
-        if data_tensors.organic_reach is None
-        else data_tensors.organic_reach * counterfactual1
-    )
-    new_non_media_treatments1 = (
-        None
-        if data_tensors.non_media_treatments is None
-        else data_tensors.non_media_treatments
-    )
+
     data_tensors0 = self._get_scaled_data_tensors(
-        new_data=DataTensors(
-            media=new_media0,
-            reach=new_reach0,
-            frequency=data_tensors.frequency,
-            organic_media=new_organic_media0,
-            organic_reach=new_organic_reach0,
-            organic_frequency=data_tensors.organic_frequency,
-            non_media_treatments=new_non_media_treatments0,
-            revenue_per_kpi=data_tensors.revenue_per_kpi,
-        ),
+        new_data=incremented_data0,
         include_non_paid_channels=include_non_paid_channels,
     )
     data_tensors1 = self._get_scaled_data_tensors(
-        new_data=DataTensors(
-            media=new_media1,
-            reach=new_reach1,
-            frequency=data_tensors.frequency,
-            organic_media=new_organic_media1,
-            organic_reach=new_organic_reach1,
-            organic_frequency=data_tensors.organic_frequency,
-            non_media_treatments=new_non_media_treatments1,
-            revenue_per_kpi=data_tensors.revenue_per_kpi,
-        ),
+        new_data=incremented_data1,
         include_non_paid_channels=include_non_paid_channels,
     )
 
@@ -2101,41 +2051,26 @@ class Analyzer:
         )
     return tf.concat(incremental_outcome_temps, axis=1)
 
-  def _validate_and_fill_roi_analysis_arguments(
+  def _validate_geo_and_time_granularity(
       self,
-      new_data: DataTensors,
       selected_geos: Sequence[str] | None = None,
       selected_times: Sequence[str] | None = None,
       aggregate_geos: bool = True,
-      aggregate_times: bool = True,
-  ) -> DataTensors:
-    """Validates dimensions of arguments for ROI analysis methods.
-
-    Validates dimensionality requirements for `new_data` and other arguments for
-    ROI analysis methods.
+  ):
+    """Validates the geo and time granularity arguments for ROI analysis.
 
     Args:
-      new_data: DataTensors containing optional `media`, `media_spend`, `reach`,
-        `frequency`, and `rf_spend` data.
       selected_geos: Optional. Contains a subset of geos to include. By default,
         all geos are included.
       selected_times: Optional. Contains a subset of times to include. By
         default, all time periods are included.
       aggregate_geos: If `True`, then expected revenue is summed over all
         regions.
-      aggregate_times: If `True`, then expected revenue is summed over all time
-        periods.
-
-    Returns:
-      `DataTensors` containing the new data tensors, filled using the original
-      data tensors if the new data tensors are `None`.
 
     Raises:
-      ValueError: If the dimensions of the arguments do not match the
-        dimensions of the corresponding tensors in the Meridian object or if
-        the other arguments are invalid.
+      ValueError: If the geo or time granularity arguments are not valid for the
+        ROI analysis.
     """
-
     if self._meridian.is_national:
       _warn_if_geo_arg_in_kwargs(
           aggregate_geos=aggregate_geos,
@@ -2147,113 +2082,35 @@ class Analyzer:
           and not self._meridian.input_data.media_spend_has_geo_dimension
       ):
         raise ValueError(
-            "aggregate_geos=False not allowed because Meridian media_spend data"
-            " does not have geo dimension."
+            "`selected_geos` and `aggregate_geos=False` are not allowed because"
+            " Meridian `media_spend` data does not have a geo dimension."
         )
       if (
           self._meridian.rf_tensors.rf_spend is not None
           and not self._meridian.input_data.rf_spend_has_geo_dimension
       ):
         raise ValueError(
-            "aggregate_geos=False not allowed because Meridian rf_spend data"
-            " does not have geo dimension."
+            "`selected_geos` and `aggregate_geos=False` are not allowed because"
+            " Meridian `rf_spend` data does not have a geo dimension."
         )
 
-    if selected_times is not None or not aggregate_times:
+    if selected_times is not None:
       if (
           self._meridian.media_tensors.media_spend is not None
           and not self._meridian.input_data.media_spend_has_time_dimension
       ):
         raise ValueError(
-            "aggregate_times=False not allowed because Meridian media_spend"
-            " data does not have time dimension."
+            "`selected_times` is not allowed because Meridian `media_spend`"
+            " data does not have a time dimension."
         )
       if (
           self._meridian.rf_tensors.rf_spend is not None
           and not self._meridian.input_data.rf_spend_has_time_dimension
       ):
         raise ValueError(
-            "aggregate_times=False not allowed because Meridian rf_spend data"
-            " does not have time dimension."
+            "`selected_times` is not allowed because Meridian `rf_spend` data"
+            " does not have a time dimension."
         )
-
-    _check_shape_matches(
-        new_data.media,
-        f"{constants.NEW_DATA}.{constants.MEDIA}",
-        self._meridian.media_tensors.media,
-        constants.MEDIA,
-    )
-    _check_spend_shape_matches(
-        new_data.media_spend,
-        f"{constants.NEW_DATA}.{constants.MEDIA_SPEND}",
-        (
-            tf.TensorShape((self._meridian.n_media_channels)),
-            tf.TensorShape((
-                self._meridian.n_geos,
-                self._meridian.n_times,
-                self._meridian.n_media_channels,
-            )),
-        ),
-    )
-    _check_shape_matches(
-        new_data.reach,
-        f"{constants.NEW_DATA}.{constants.REACH}",
-        self._meridian.rf_tensors.reach,
-        constants.REACH,
-    )
-    _check_shape_matches(
-        new_data.frequency,
-        f"{constants.NEW_DATA}.{constants.FREQUENCY}",
-        self._meridian.rf_tensors.frequency,
-        constants.FREQUENCY,
-    )
-    _check_spend_shape_matches(
-        new_data.rf_spend,
-        f"{constants.NEW_DATA}.{constants.RF_SPEND}",
-        (
-            tf.TensorShape((self._meridian.n_rf_channels)),
-            tf.TensorShape((
-                self._meridian.n_geos,
-                self._meridian.n_times,
-                self._meridian.n_rf_channels,
-            )),
-        ),
-    )
-
-    new_media = (
-        self._meridian.media_tensors.media
-        if new_data.media is None
-        else new_data.media
-    )
-    new_reach = (
-        self._meridian.rf_tensors.reach
-        if new_data.reach is None
-        else new_data.reach
-    )
-    new_frequency = (
-        self._meridian.rf_tensors.frequency
-        if new_data.frequency is None
-        else new_data.frequency
-    )
-
-    new_media_spend = (
-        self._meridian.media_tensors.media_spend
-        if new_data.media_spend is None
-        else new_data.media_spend
-    )
-    new_rf_spend = (
-        self._meridian.rf_tensors.rf_spend
-        if new_data.rf_spend is None
-        else new_data.rf_spend
-    )
-
-    return DataTensors(
-        media=new_media,
-        reach=new_reach,
-        frequency=new_frequency,
-        media_spend=new_media_spend,
-        rf_spend=new_rf_spend,
-    )
 
   def marginal_roi(
       self,
@@ -2261,12 +2118,12 @@ class Analyzer:
       use_posterior: bool = True,
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
-      selected_times: Sequence[str] | None = None,
+      selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       by_reach: bool = True,
       use_kpi: bool = False,
       batch_size: int = constants.DEFAULT_BATCH_SIZE,
-  ) -> tf.Tensor | None:
+  ) -> tf.Tensor:
     """Calculates the marginal ROI prior or posterior distribution.
 
     The marginal ROI (mROI) numerator is the change in expected outcome (`kpi`
@@ -2277,7 +2134,7 @@ class Analyzer:
     If `new_data=None`, this method calculates marginal ROI conditional on the
     values of the paid media variables that the Meridian object was initialized
     with. The user can also override this historical data through the `new_data`
-    argument, as long as the new tensors` dimensions match. For example,
+    argument. For example,
 
     ```python
     new_data = DataTensors(media=new_media, frequency=new_frequency)
@@ -2302,14 +2159,16 @@ class Analyzer:
         `reach`, `frequency`, `rf_spend` and `revenue_per_kpi` data. If
         provided, the marginal ROI is calculated using the values of the tensors
         passed in `new_data` and the original values of all the remaining
-        tensors. The new tensors' dimensions must match the dimensions of the
-        corresponding original tensors from `meridian.input_data`. If `None`,
-        the marginal ROI is calculated using the original values of all the
-        tensors.
+        tensors. If `None`, the marginal ROI is calculated using the original
+        values of all the tensors. If any of the tensors in `new_data` is
+        provided with a different number of time periods than in `InputData`,
+        then all tensors must be provided with the same number of time periods.
       selected_geos: Optional. Contains a subset of geos to include. By default,
         all geos are included.
-      selected_times: Optional. Contains a subset of times to include. By
-        default, all time periods are included.
+      selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        the `new_data` args, if provided. By default, all time periods are
+        included.
       aggregate_geos: If `True`, the expected revenue is summed over all of the
         regions.
       by_reach: Used for a channel with reach and frequency. If `True`, returns
@@ -2327,49 +2186,55 @@ class Analyzer:
       (n_media_channels + n_rf_channels))`. The `n_geos` dimension is dropped if
       `aggregate_geos=True`.
     """
-    self._check_revenue_data_exists(use_kpi)
     dim_kwargs = {
         "selected_geos": selected_geos,
         "selected_times": selected_times,
         "aggregate_geos": aggregate_geos,
-        "aggregate_times": True,
     }
-    incremental_outcome_kwargs = {
-        "inverse_transform_outcome": True,
-        "use_posterior": use_posterior,
-        "use_kpi": use_kpi,
-        "batch_size": batch_size,
-        "include_non_paid_channels": False,
-    }
-    filled_data = self._validate_and_fill_roi_analysis_arguments(
-        new_data=new_data or DataTensors(),
-        **dim_kwargs,
+    self._check_revenue_data_exists(use_kpi)
+    self._validate_geo_and_time_granularity(**dim_kwargs)
+    required_values = [
+        constants.MEDIA,
+        constants.MEDIA_SPEND,
+        constants.REACH,
+        constants.FREQUENCY,
+        constants.RF_SPEND,
+        constants.REVENUE_PER_KPI,
+    ]
+    if not new_data:
+      new_data = DataTensors()
+    filled_data = new_data.validate_and_fill_missing_data(
+        required_tensors_names=required_values,
+        meridian=self._meridian,
     )
-    incremental_outcome = self.incremental_outcome(
+    numerator = self.incremental_outcome(
         new_data=filled_data,
-        **incremental_outcome_kwargs,
+        scaling_factor0=1,
+        scaling_factor1=1 + incremental_increase,
+        inverse_transform_outcome=True,
+        use_posterior=use_posterior,
+        use_kpi=use_kpi,
+        by_reach=by_reach,
+        batch_size=batch_size,
+        include_non_paid_channels=False,
+        aggregate_times=True,
         **dim_kwargs,
     )
-    incremented_data = _scale_tensors_by_multiplier(
-        data=filled_data,
-        multiplier=incremental_increase + 1,
-        by_reach=by_reach,
-    )
-    incremental_outcome_with_multiplier = self.incremental_outcome(
-        new_data=incremented_data, **dim_kwargs, **incremental_outcome_kwargs
-    )
-    numerator = incremental_outcome_with_multiplier - incremental_outcome
     spend_inc = filled_data.total_spend() * incremental_increase
     if spend_inc is not None and spend_inc.ndim == 3:
       denominator = self.filter_and_aggregate_geos_and_times(
-          spend_inc, **dim_kwargs
+          spend_inc,
+          aggregate_times=True,
+          flexible_time_dim=True,
+          has_media_dim=True,
+          **dim_kwargs,
       )
     else:
       if not aggregate_geos:
         # This check should not be reachable. It is here to protect against
-        # future changes to self._validate_and_fill_roi_analysis_arguments. If
+        # future changes to self._validate_geo_and_time_granularity. If
         # spend_inc.ndim is not 3 and `aggregate_geos` is `False`, then
-        # self._validate_and_fill_roi_analysis_arguments should raise an error.
+        # self._validate_geo_and_time_granularity should raise an error.
         raise ValueError(
             "aggregate_geos must be True if spend does not have a geo "
             "dimension."
@@ -2382,7 +2247,7 @@ class Analyzer:
       use_posterior: bool = True,
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
-      selected_times: Sequence[str] | None = None,
+      selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       use_kpi: bool = False,
       batch_size: int = constants.DEFAULT_BATCH_SIZE,
@@ -2396,8 +2261,8 @@ class Analyzer:
 
     If `new_data=None`, this method calculates ROI conditional on the values of
     the paid media variables that the Meridian object was initialized with. The
-    user can also override this historical data through the `new_data` argument,
-    as long as the new tensors' dimensions match. For example,
+    user can also override this historical data through the `new_data` argument.
+    For example,
 
     ```python
     new_data = DataTensors(media=new_media, frequency=new_frequency)
@@ -2417,14 +2282,17 @@ class Analyzer:
       new_data: Optional. DataTensors containing `media`, `media_spend`,
         `reach`, `frequency`, and `rf_spend`, and `revenue_per_kpi` data. If
         provided, the ROI is calculated using the values of the tensors passed
-        in `new_data` and the original values of all the remaining tensors. The
-        new tensors' dimensions must match the dimensions of the corresponding
-        original tensors from `meridian.input_data`. If `None`, the ROI is
-        calculated using the original values of all the tensors.
-      selected_geos: Optional list containing a subset of geos to include. By
-        default, all geos are included.
-      selected_times: Optional list containing a subset of times to include. By
-        default, all time periods are included.
+        in `new_data` and the original values of all the remaining tensors. If
+        `None`, the ROI is calculated using the original values of all the
+        tensors. If any of the tensors in `new_data` is provided with a
+        different number of time periods than in `InputData`, then all tensors
+        must be provided with the same number of time periods.
+      selected_geos: Optional. Contains a subset of geos to include. By default,
+        all geos are included.
+      selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        the `new_data` args, if provided. By default, all time periods are
+        included.
       aggregate_geos: Boolean. If `True`, the expected revenue is summed over
         all of the regions.
       use_kpi: If `False`, then revenue is used to calculate the ROI numerator.
@@ -2439,12 +2307,10 @@ class Analyzer:
       (n_media_channels + n_rf_channels))`. The `n_geos` dimension is dropped if
       `aggregate_geos=True`.
     """
-    self._check_revenue_data_exists(use_kpi)
     dim_kwargs = {
         "selected_geos": selected_geos,
         "selected_times": selected_times,
         "aggregate_geos": aggregate_geos,
-        "aggregate_times": True,
     }
     incremental_outcome_kwargs = {
         "inverse_transform_outcome": True,
@@ -2452,10 +2318,23 @@ class Analyzer:
         "use_kpi": use_kpi,
         "batch_size": batch_size,
         "include_non_paid_channels": False,
+        "aggregate_times": True,
     }
-    filled_data = self._validate_and_fill_roi_analysis_arguments(
-        new_data=new_data or DataTensors(),
-        **dim_kwargs,
+    self._check_revenue_data_exists(use_kpi)
+    self._validate_geo_and_time_granularity(**dim_kwargs)
+    required_values = [
+        constants.MEDIA,
+        constants.MEDIA_SPEND,
+        constants.REACH,
+        constants.FREQUENCY,
+        constants.RF_SPEND,
+        constants.REVENUE_PER_KPI,
+    ]
+    if not new_data:
+      new_data = DataTensors()
+    filled_data = new_data.validate_and_fill_missing_data(
+        required_tensors_names=required_values,
+        meridian=self._meridian,
     )
     incremental_outcome = self.incremental_outcome(
         new_data=filled_data,
@@ -2466,15 +2345,19 @@ class Analyzer:
     spend = filled_data.total_spend()
     if spend is not None and spend.ndim == 3:
       denominator = self.filter_and_aggregate_geos_and_times(
-          spend, **dim_kwargs
+          spend,
+          aggregate_times=True,
+          flexible_time_dim=True,
+          has_media_dim=True,
+          **dim_kwargs,
       )
     else:
       if not aggregate_geos:
         # This check should not be reachable. It is here to protect against
-        # future changes to self._validate_and_fill_roi_analysis_arguments. If
+        # future changes to self._validate_geo_and_time_granularity. If
         # spend_inc.ndim is not 3 and either of `aggregate_geos` or
         # `aggregate_times` is `False`, then
-        # self._validate_and_fill_roi_analysis_arguments should raise an error.
+        # self._validate_geo_and_time_granularity should raise an error.
         raise ValueError(
             "aggregate_geos must be True if spend does not have a geo "
             "dimension."
@@ -2487,7 +2370,7 @@ class Analyzer:
       use_posterior: bool = True,
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
-      selected_times: Sequence[str] | None = None,
+      selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       batch_size: int = constants.DEFAULT_BATCH_SIZE,
   ) -> tf.Tensor:
@@ -2499,8 +2382,8 @@ class Analyzer:
 
     If `new_data=None`, this method calculates CPIK conditional on the values of
     the paid media variables that the Meridian object was initialized with. The
-    user can also override this historical data through the `new_data` argument,
-    as long as the new tensors' dimensions match. For example,
+    user can also override this historical data through the `new_data` argument.
+    For example,
 
     ```python
     new_data = DataTensors(media=new_media, frequency=new_frequency)
@@ -2510,9 +2393,8 @@ class Analyzer:
     numerator is the total spend during the selected geos and time periods. An
     exception will be thrown if the spend of the InputData used to train the
     model does not have geo and time dimensions. (If the `new_data.media_spend`
-    and
-    `new_data.rf_spend` arguments are used with different dimensions than the
-    InputData spend, then an exception will be thrown since this is a likely
+    and `new_data.rf_spend` arguments are used with different dimensions than
+    the InputData spend, then an exception will be thrown since this is a likely
     user error.)
 
     Note that CPIK is simply 1/ROI, where ROI is obtained from a call to the
@@ -2524,14 +2406,17 @@ class Analyzer:
       new_data: Optional. DataTensors containing `media`, `media_spend`,
         `reach`, `frequency`, `rf_spend` and `revenue_per_kpi` data. If
         provided, the cpik is calculated using the values of the tensors passed
-        in `new_data` and the original values of all the remaining tensors. The
-        new tensors' dimensions must match the dimensions of the corresponding
-        original tensors from `meridian.input_data`. If `None`, the cpik is
-        calculated using the original values of all the tensors.
-      selected_geos: Optional list containing a subset of geos to include. By
-        default, all geos are included.
-      selected_times: Optional list containing a subset of times to include. By
-        default, all time periods are included.
+        in `new_data` and the original values of all the remaining tensors. If
+        `None`, the ROI is calculated using the original values of all the
+        tensors. If any of the tensors in `new_data` is provided with a
+        different number of time periods than in `InputData`, then all tensors
+        must be provided with the same number of time periods.
+      selected_geos: Optional. Contains a subset of geos to include. By default,
+        all geos are included.
+      selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        the `new_data` args, if provided. By default, all time periods are
+        included.
       aggregate_geos: Boolean. If `True`, the expected KPI is summed over all of
         the regions.
       batch_size: Integer representing the maximum draws per chain in each
@@ -2881,7 +2766,7 @@ class Analyzer:
       marginal_roi_by_reach: bool = True,
       marginal_roi_incremental_increase: float = 0.01,
       selected_geos: Sequence[str] | None = None,
-      selected_times: Sequence[str] | None = None,
+      selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       aggregate_times: bool = True,
       optimal_frequency: Sequence[float] | None = None,
@@ -2896,7 +2781,9 @@ class Analyzer:
     If `new_data=None`, this method calculates all the metrics conditional on
     the values of the data variables that the Meridian object was initialized
     with. The user can also override this historical data through the `new_data`
-    argument, as long as the new tensors` dimensions match. For example,
+    argument. For example, to override the media, frequency, and non-media
+    treatments data variables, the user can pass the following `new_data`
+    argument:
 
     ```python
     new_data = DataTensors(
@@ -2905,19 +2792,24 @@ class Analyzer:
         non_media_treatments=new_non_media_treatments)
     ```
 
+    Note that if `new_data` is provided with a different number of time periods
+    than in `InputData`, `pct_of_contribution` is not defined because
+    `expected_outcome()` is not defined for new time periods.
+
     Note that `mroi` and `effectiveness` metrics are not defined (`math.nan`)
     for the aggregate `"All Paid Channels"` channel dimension.
 
     Args:
       new_data: Optional `DataTensors` object with optional new tensors:
-        `media`, `reach`, `frequency`, `organic_media`, `organic_reach`,
-        `organic_frequency`, `non_media_treatments`, `controls`,
-        `revenue_per_kpi`. If provided, the summary metrics are calculated using
-        the values of the tensors passed in `new_data` and the original values
-        of all the remaining tensors. The new tensors' dimensions must match the
-        dimensions of the corresponding original tensors from
-        `meridian.input_data`. If `None`, the summary metrics are calculated
-        using the original values of all the tensors.
+        `media`, `media_spend`, `reach`, `frequency`, `rf_spend`,
+        `organic_media`, `organic_reach`, `organic_frequency`,
+        `non_media_treatments`, `controls`, `revenue_per_kpi`. If provided, the
+        summary metrics are calculated using the values of the tensors passed in
+        `new_data` and the original values of all the remaining tensors. If
+        `None`, the summary metrics are calculated using the original values of
+        all the tensors. If `new_data` is provided with a different number of
+        time periods than in `InputData`, then all tensors, except `controls`,
+        must have the same number of time periods.
       marginal_roi_by_reach: Boolean. Marginal ROI (mROI) is defined as the
         return on the next dollar spent. If this argument is `True`, the
         assumption is that the next dollar spent only impacts reach, holding
@@ -2930,8 +2822,10 @@ class Analyzer:
         when `include_non_paid_channels` is `False`.
       selected_geos: Optional list containing a subset of geos to include. By
         default, all geos are included.
-      selected_times: Optional list containing a subset of times to include. By
-        default, all time periods are included.
+      selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        the tensors in the `new_data` argument, if provided. By default, all
+        time periods are included.
       aggregate_geos: Boolean. If `True`, the expected outcome is summed over
         all of the regions.
       aggregate_times: Boolean. If `True`, the expected outcome is summed over
@@ -2982,12 +2876,8 @@ class Analyzer:
         "aggregate_geos": aggregate_geos,
         "aggregate_times": aggregate_times,
     }
-    dim_kwargs_wo_agg_times = {
-        "selected_geos": selected_geos,
-        "selected_times": selected_times,
-        "aggregate_geos": aggregate_geos,
-    }
     batched_kwargs = {"batch_size": batch_size}
+    new_data = new_data or DataTensors()
     aggregated_impressions = self.get_aggregated_impressions(
         new_data=new_data,
         optimal_frequency=optimal_frequency,
@@ -3020,19 +2910,31 @@ class Analyzer:
         **dim_kwargs,
         **batched_kwargs,
     )
-    expected_outcome_prior = self.expected_outcome(
+    incremental_outcome_mroi_prior = self.compute_incremental_outcome_aggregate(
         use_posterior=False,
         new_data=new_data,
         use_kpi=use_kpi,
+        by_reach=marginal_roi_by_reach,
+        scaling_factor0=1,
+        scaling_factor1=1 + marginal_roi_incremental_increase,
+        include_non_paid_channels=include_non_paid_channels,
+        non_media_baseline_values=non_media_baseline_values,
         **dim_kwargs,
         **batched_kwargs,
     )
-    expected_outcome_posterior = self.expected_outcome(
-        use_posterior=True,
-        new_data=new_data,
-        use_kpi=use_kpi,
-        **dim_kwargs,
-        **batched_kwargs,
+    incremental_outcome_mroi_posterior = (
+        self.compute_incremental_outcome_aggregate(
+            use_posterior=True,
+            new_data=new_data,
+            use_kpi=use_kpi,
+            by_reach=marginal_roi_by_reach,
+            scaling_factor0=1,
+            scaling_factor1=1 + marginal_roi_incremental_increase,
+            include_non_paid_channels=include_non_paid_channels,
+            non_media_baseline_values=non_media_baseline_values,
+            **dim_kwargs,
+            **batched_kwargs,
+        )
     )
 
     xr_dims = (
@@ -3059,11 +2961,20 @@ class Analyzer:
       )
       xr_coords[constants.GEO] = ([constants.GEO], geo_dims)
     if not aggregate_times:
-      time_dims = (
-          self._meridian.input_data.time.data
-          if selected_times is None
-          else selected_times
-      )
+      # Get the time coordinates for flexible time dimensions.
+      modified_times = new_data.get_modified_times(self._meridian)
+      if modified_times is None:
+        times = self._meridian.input_data.time.data
+      else:
+        times = np.arange(modified_times)
+
+      if selected_times is None:
+        time_dims = times
+      elif _is_bool_list(selected_times):
+        indices = np.where(selected_times)
+        time_dims = times[indices]
+      else:
+        time_dims = selected_times
       xr_coords[constants.TIME] = ([constants.TIME], time_dims)
     xr_dims_with_ci_and_distribution = xr_dims + (
         constants.METRIC,
@@ -3094,15 +3005,6 @@ class Analyzer:
         confidence_level=confidence_level,
         include_median=True,
     )
-    pct_of_contribution = self._compute_pct_of_contribution(
-        incremental_outcome_prior=incremental_outcome_prior,
-        incremental_outcome_posterior=incremental_outcome_posterior,
-        expected_outcome_prior=expected_outcome_prior,
-        expected_outcome_posterior=expected_outcome_posterior,
-        xr_dims=xr_dims_with_ci_and_distribution,
-        xr_coords=xr_coords_with_ci_and_distribution,
-        confidence_level=confidence_level,
-    )
     effectiveness = self._compute_effectiveness_aggregate(
         incremental_outcome_prior=incremental_outcome_prior,
         incremental_outcome_posterior=incremental_outcome_posterior,
@@ -3116,6 +3018,33 @@ class Analyzer:
         # because the media execution metric is generally not consistent across
         # channels.
     ).where(lambda ds: ds.channel != constants.ALL_CHANNELS)
+
+    if new_data.get_modified_times(self._meridian) is None:
+      expected_outcome_prior = self.expected_outcome(
+          use_posterior=False,
+          new_data=new_data,
+          use_kpi=use_kpi,
+          **dim_kwargs,
+          **batched_kwargs,
+      )
+      expected_outcome_posterior = self.expected_outcome(
+          use_posterior=True,
+          new_data=new_data,
+          use_kpi=use_kpi,
+          **dim_kwargs,
+          **batched_kwargs,
+      )
+      pct_of_contribution = self._compute_pct_of_contribution(
+          incremental_outcome_prior=incremental_outcome_prior,
+          incremental_outcome_posterior=incremental_outcome_posterior,
+          expected_outcome_prior=expected_outcome_prior,
+          expected_outcome_posterior=expected_outcome_posterior,
+          xr_dims=xr_dims_with_ci_and_distribution,
+          xr_coords=xr_coords_with_ci_and_distribution,
+          confidence_level=confidence_level,
+      )
+    else:
+      pct_of_contribution = xr.Dataset()
 
     if include_non_paid_channels:
       # If non-paid channels are included, return only the non-paid metrics.
@@ -3141,8 +3070,10 @@ class Analyzer:
     # If non-paid channels are not included, return all metrics, paid and
     # non-paid.
     spend_list = []
-    new_spend_tensors = self._fill_missing_data_tensors(
-        new_data, [constants.MEDIA_SPEND, constants.RF_SPEND]
+    if new_data is None:
+      new_data = DataTensors()
+    new_spend_tensors = new_data.validate_and_fill_missing_data(
+        [constants.MEDIA_SPEND, constants.RF_SPEND], self._meridian
     )
     if self._meridian.n_media_channels > 0:
       spend_list.append(new_spend_tensors.media_spend)
@@ -3150,7 +3081,9 @@ class Analyzer:
       spend_list.append(new_spend_tensors.rf_spend)
     # TODO Add support for 1-dimensional spend.
     aggregated_spend = self.filter_and_aggregate_geos_and_times(
-        tensor=tf.concat(spend_list, axis=-1), **dim_kwargs
+        tensor=tf.concat(spend_list, axis=-1),
+        flexible_time_dim=True,
+        **dim_kwargs,
     )
     spend_with_total = tf.concat(
         [aggregated_spend, tf.reduce_sum(aggregated_spend, -1, keepdims=True)],
@@ -3185,19 +3118,14 @@ class Analyzer:
           confidence_level=confidence_level,
           spend_with_total=spend_with_total,
       )
-      mroi = self._compute_marginal_roi_aggregate(
-          marginal_roi_by_reach=marginal_roi_by_reach,
-          marginal_roi_incremental_increase=marginal_roi_incremental_increase,
-          expected_revenue_prior=expected_outcome_prior,
-          expected_revenue_posterior=expected_outcome_posterior,
+      mroi = self._compute_roi_aggregate(
+          incremental_outcome_prior=incremental_outcome_mroi_prior,
+          incremental_outcome_posterior=incremental_outcome_mroi_posterior,
           xr_dims=xr_dims_with_ci_and_distribution,
           xr_coords=xr_coords_with_ci_and_distribution,
           confidence_level=confidence_level,
-          spend_with_total=spend_with_total,
-          new_data=new_data,
-          use_kpi=use_kpi,
-          **dim_kwargs_wo_agg_times,
-          **batched_kwargs,
+          spend_with_total=spend_with_total * marginal_roi_incremental_increase,
+          metric_name=constants.MROI,
           # Drop mROI metric values in the Dataset's data_vars for the
           # aggregated "All Paid Channels" channel dimension value.
           # "Marginal ROI" calculation must arbitrarily assume how the
@@ -3241,7 +3169,7 @@ class Analyzer:
       self,
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
-      selected_times: Sequence[str] | None = None,
+      selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       aggregate_times: bool = True,
       optimal_frequency: Sequence[float] | None = None,
@@ -3255,14 +3183,14 @@ class Analyzer:
         `organic_frequency`, and `non_media_treatments` tensors. If `new_data`
         argument is used, then the aggregated impressions are computed using the
         values of the tensors passed in the `new_data` argument and the original
-        values of all the remaining tensors. The new tensors' dimensions must
-        match the dimensions of the corresponding original tensors from
-        `meridian.input_data`. If `None`, the existing tensors from the Meridian
-        object are used.
+        values of all the remaining tensors. If `None`, the existing tensors
+        from the Meridian object are used.
       selected_geos: Optional list containing a subset of geos to include. By
         default, all geos are included.
-      selected_times: Optional list containing a subset of times to include. By
-        default, all time periods are included.
+      selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        the tensors in the `new_data` argument, if provided. By default, all
+        time periods are included.
       aggregate_geos: Boolean. If `True`, the expected outcome is summed over
         all of the regions.
       aggregate_times: Boolean. If `True`, the expected outcome is summed over
@@ -3291,12 +3219,18 @@ class Analyzer:
           constants.ORGANIC_FREQUENCY,
           constants.NON_MEDIA_TREATMENTS,
       ])
-    data_tensors = self._fill_missing_data_tensors(new_data, tensor_names_list)
+    if new_data is None:
+      new_data = DataTensors()
+    data_tensors = new_data.validate_and_fill_missing_data(
+        tensor_names_list, self._meridian
+    )
+    n_times = (
+        data_tensors.get_modified_times(self._meridian)
+        or self._meridian.n_times
+    )
     impressions_list = []
     if self._meridian.n_media_channels > 0:
-      impressions_list.append(
-          data_tensors.media[:, -self._meridian.n_times :, :]
-      )
+      impressions_list.append(data_tensors.media[:, -n_times:, :])
 
     if self._meridian.n_rf_channels > 0:
       if optimal_frequency is None:
@@ -3304,15 +3238,12 @@ class Analyzer:
       else:
         new_frequency = tf.ones_like(data_tensors.frequency) * optimal_frequency
       impressions_list.append(
-          data_tensors.reach[:, -self._meridian.n_times :, :]
-          * new_frequency[:, -self._meridian.n_times :, :]
+          data_tensors.reach[:, -n_times:, :] * new_frequency[:, -n_times:, :]
       )
 
     if include_non_paid_channels:
       if self._meridian.n_organic_media_channels > 0:
-        impressions_list.append(
-            data_tensors.organic_media[:, -self._meridian.n_times :, :]
-        )
+        impressions_list.append(data_tensors.organic_media[:, -n_times:, :])
       if self._meridian.n_organic_rf_channels > 0:
         if optimal_frequency is None:
           new_organic_frequency = data_tensors.organic_frequency
@@ -3321,8 +3252,8 @@ class Analyzer:
               tf.ones_like(data_tensors.organic_frequency) * optimal_frequency
           )
         impressions_list.append(
-            data_tensors.organic_reach[:, -self._meridian.n_times :, :]
-            * new_organic_frequency[:, -self._meridian.n_times :, :]
+            data_tensors.organic_reach[:, -n_times:, :]
+            * new_organic_frequency[:, -n_times:, :]
         )
       if self._meridian.n_non_media_channels > 0:
         impressions_list.append(data_tensors.non_media_treatments)
@@ -3333,6 +3264,7 @@ class Analyzer:
         selected_times=selected_times,
         aggregate_geos=aggregate_geos,
         aggregate_times=aggregate_times,
+        flexible_time_dim=True,
     )
 
   def baseline_summary_metrics(
@@ -4544,85 +4476,13 @@ class Analyzer:
       xr_coords: Mapping[str, tuple[Sequence[str], Sequence[str]]],
       spend_with_total: tf.Tensor,
       confidence_level: float = constants.DEFAULT_CONFIDENCE_LEVEL,
+      metric_name: str = constants.ROI,
   ) -> xr.Dataset:
     # TODO: Support calibration_period_bool.
     return _central_tendency_and_ci_by_prior_and_posterior(
         prior=incremental_outcome_prior / spend_with_total,
         posterior=incremental_outcome_posterior / spend_with_total,
-        metric_name=constants.ROI,
-        xr_dims=xr_dims,
-        xr_coords=xr_coords,
-        confidence_level=confidence_level,
-        include_median=True,
-    )
-
-  def _compute_marginal_roi_aggregate(
-      self,
-      marginal_roi_by_reach: bool,
-      marginal_roi_incremental_increase: float,
-      expected_revenue_prior: tf.Tensor,
-      expected_revenue_posterior: tf.Tensor,
-      xr_dims: Sequence[str],
-      xr_coords: Mapping[str, tuple[Sequence[str], Sequence[str]]],
-      spend_with_total: tf.Tensor,
-      new_data: DataTensors | None = None,
-      use_kpi: bool = False,
-      confidence_level: float = constants.DEFAULT_CONFIDENCE_LEVEL,
-      **roi_kwargs,
-  ) -> xr.Dataset:
-    data_tensors = self._fill_missing_data_tensors(
-        new_data, [constants.MEDIA, constants.REACH, constants.FREQUENCY]
-    )
-    mroi_prior = self.marginal_roi(
-        use_posterior=False,
-        new_data=data_tensors,
-        by_reach=marginal_roi_by_reach,
-        incremental_increase=marginal_roi_incremental_increase,
-        use_kpi=use_kpi,
-        **roi_kwargs,
-    )
-    mroi_posterior = self.marginal_roi(
-        use_posterior=True,
-        new_data=data_tensors,
-        by_reach=marginal_roi_by_reach,
-        incremental_increase=marginal_roi_incremental_increase,
-        use_kpi=use_kpi,
-        **roi_kwargs,
-    )
-    incremented_data = _scale_tensors_by_multiplier(
-        data=data_tensors,
-        multiplier=(1 + marginal_roi_incremental_increase),
-        by_reach=marginal_roi_by_reach,
-    )
-
-    mroi_prior_total = (
-        self.expected_outcome(
-            use_posterior=False,
-            new_data=incremented_data,
-            use_kpi=use_kpi,
-            **roi_kwargs,
-        )
-        - expected_revenue_prior
-    ) / (marginal_roi_incremental_increase * spend_with_total[..., -1])
-    mroi_posterior_total = (
-        self.expected_outcome(
-            use_posterior=True,
-            new_data=incremented_data,
-            use_kpi=use_kpi,
-            **roi_kwargs,
-        )
-        - expected_revenue_posterior
-    ) / (marginal_roi_incremental_increase * spend_with_total[..., -1])
-    mroi_prior_concat = tf.concat(
-        [mroi_prior, mroi_prior_total[..., None]], axis=-1
-    )
-    mroi_posterior_concat = tf.concat(
-        [mroi_posterior, mroi_posterior_total[..., None]], axis=-1
-    )
-    return _central_tendency_and_ci_by_prior_and_posterior(
-        prior=mroi_prior_concat,
-        posterior=mroi_posterior_concat,
-        metric_name=constants.MROI,
+        metric_name=metric_name,
         xr_dims=xr_dims,
         xr_coords=xr_coords,
         confidence_level=confidence_level,

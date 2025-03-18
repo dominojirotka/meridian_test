@@ -203,53 +203,51 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
       self.assertLen(w, 1)
       self.assertTrue(issubclass(w[0].category, UserWarning))
       self.assertIn(
-          "A `revenue_per_kpi` value was passed in the `new_data` argument to"
-          " the `expected_outcome()` method. This is currently not supported"
-          " and will be ignored.",
+          "A `revenue_per_kpi` value was passed in the `new_data` argument. "
+          "This is not supported and will be ignored.",
           str(w[0].message),
       )
 
-  def test_expected_outcome_wrong_controls_raises_exception(self):
+  def test_expected_outcome_wrong_new_data_dims_raises_exception(self):
+    with self.assertRaisesWithLiteralMatch(
+        ValueError,
+        "New `controls` must have 3 dimension(s). Found 2 dimension(s).",
+    ):
+      self.analyzer_media_and_rf.expected_outcome(
+          new_data=analyzer.DataTensors(controls=tf.ones((_N_GEOS, _N_TIMES))),
+      )
+
+  def test_expected_outcome_wrong_new_data_geos_raises_exception(self):
     with self.assertRaisesRegex(
         ValueError,
-        "new_controls.shape must match controls.shape",
+        "New `media` is expected to have 5 geos. Found 6 geos.",
     ):
       self.analyzer_media_and_rf.expected_outcome(
           new_data=analyzer.DataTensors(
-              controls=self.meridian_media_and_rf.population
+              media=tf.ones((6, _N_MEDIA_TIMES, _N_MEDIA_CHANNELS))
           ),
       )
 
-  def test_expected_outcome_wrong_media_raises_exception(self):
+  def test_expected_outcome_wrong_new_data_times_raises_exception(self):
     with self.assertRaisesRegex(
         ValueError,
-        "new_media.shape must match media.shape",
+        "New `media` is expected to have 52 time periods. Found 10 time"
+        " periods.",
     ):
       self.analyzer_media_and_rf.expected_outcome(
           new_data=analyzer.DataTensors(
-              media=self.meridian_media_and_rf.population
+              media=tf.ones((_N_GEOS, 10, _N_MEDIA_CHANNELS))
           ),
       )
 
-  def test_expected_outcome_wrong_reach_raises_exception(self):
+  def test_expected_outcome_wrong_new_data_channels_raises_exception(self):
     with self.assertRaisesRegex(
         ValueError,
-        "new_reach.shape must match reach.shape",
+        "New `frequency` is expected to have 2 channels. Found 3 channels.",
     ):
       self.analyzer_media_and_rf.expected_outcome(
           new_data=analyzer.DataTensors(
-              reach=self.meridian_media_and_rf.population
-          ),
-      )
-
-  def test_expected_outcome_wrong_frequency_raises_exception(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "new_frequency.shape must match frequency.shape",
-    ):
-      self.analyzer_media_and_rf.expected_outcome(
-          new_data=analyzer.DataTensors(
-              frequency=self.meridian_media_and_rf.population
+              frequency=tf.ones((_N_GEOS, _N_TIMES, 3))
           ),
       )
 
@@ -308,31 +306,30 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
       self.assertLen(w, 1)
       self.assertTrue(issubclass(w[0].category, UserWarning))
       self.assertIn(
-          "A `controls` value was passed in the `new_data` argument to the"
-          " `incremental_outcome()` method. This has no effect on the output"
-          " and will be ignored.",
+          "A `controls` value was passed in the `new_data` argument. This is"
+          " not supported and will be ignored.",
           str(w[0].message),
       )
 
   @parameterized.named_parameters(
       (
           "wrong_media_dims",
-          analyzer.DataTensors(media=tf.ones((5, 1))),
+          {"media": tf.ones((5, 1))},
           "New `media` must have 3 dimension(s). Found 2 dimension(s).",
       ),
       (
           "wrong_reach_dims",
-          analyzer.DataTensors(reach=tf.ones((5, 1))),
+          {"reach": tf.ones((5, 1))},
           "New `reach` must have 3 dimension(s). Found 2 dimension(s).",
       ),
       (
           "wrong_frequency_dims",
-          analyzer.DataTensors(frequency=tf.ones((5, 1))),
+          {"frequency": tf.ones((5, 1))},
           "New `frequency` must have 3 dimension(s). Found 2 dimension(s).",
       ),
       (
           "wrong_revenue_per_kpi_dims",
-          analyzer.DataTensors(revenue_per_kpi=tf.ones((5))),
+          {"revenue_per_kpi": tf.ones((5))},
           (
               "New `revenue_per_kpi` must have 2 dimension(s). Found 1"
               " dimension(s)."
@@ -345,7 +342,9 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
       expected_error_message: str,
   ):
     with self.assertRaisesWithLiteralMatch(ValueError, expected_error_message):
-      self.analyzer_media_and_rf.incremental_outcome(new_data=new_param)
+      self.analyzer_media_and_rf.incremental_outcome(
+          new_data=analyzer.DataTensors(**new_param)
+      )
 
   @parameterized.named_parameters(
       ("missing_media", "media"),
@@ -471,8 +470,8 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
         ValueError,
         "If the time dimension of any variable in `new_data` is modified, then"
         " all variables must be provided with the same number of time periods."
-        " `new_data.revenue_per_kpi` has 8 time periods and does not match"
-        " `new_data.media` which has 10 time periods.",
+        " `revenue_per_kpi` has 8 time periods, which does not match the"
+        " modified number of time periods, 10.",
     ):
       self.analyzer_media_and_rf.incremental_outcome(
           new_data=analyzer.DataTensors(
@@ -687,6 +686,28 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
         atol=1e-3,
     )
 
+  def test_incremental_outcome_media_and_rf_new_params_correct_shape(self):
+    model.Meridian.inference_data = mock.PropertyMock(
+        return_value=self.inference_data_media_and_rf
+    )
+    outcome = self.analyzer_media_and_rf.incremental_outcome(
+        new_data=analyzer.DataTensors(
+            media=self.meridian_media_and_rf.media_tensors.media[..., -15:, :],
+            reach=self.meridian_media_and_rf.rf_tensors.reach[..., -15:, :],
+            frequency=self.meridian_media_and_rf.rf_tensors.frequency[
+                ..., -15:, :
+            ],
+            revenue_per_kpi=self.meridian_media_and_rf.revenue_per_kpi[
+                ..., -15:
+            ],
+        ),
+        aggregate_times=False,
+    )
+    self.assertEqual(
+        outcome.shape,
+        (_N_CHAINS, _N_KEEP, 15, _N_MEDIA_CHANNELS + _N_RF_CHANNELS),
+    )
+
   @parameterized.product(
       use_posterior=[False, True],
       aggregate_geos=[False, True],
@@ -767,60 +788,78 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
         atol=1e-3,
     )
 
-  def test_roi_wrong_media_raises_exception(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "new_data.media.shape must match media.shape",
-    ):
-      self.analyzer_media_and_rf.roi(
-          new_data=analyzer.DataTensors(
-              media=self.meridian_media_and_rf.population
-          ),
-      )
+  def test_marginal_roi_media_and_rf_new_data_modified_times(self):
+    model.Meridian.inference_data = mock.PropertyMock(
+        return_value=self.inference_data_media_and_rf
+    )
+    mroi = self.analyzer_media_and_rf.marginal_roi(
+        new_data=analyzer.DataTensors(
+            media=self.meridian_media_and_rf.media_tensors.media[..., -15:, :],
+            media_spend=self.meridian_media_and_rf.media_tensors.media_spend[
+                ..., -15:, :
+            ],
+            reach=self.meridian_media_and_rf.rf_tensors.reach[..., -15:, :],
+            frequency=self.meridian_media_and_rf.rf_tensors.frequency[
+                ..., -15:, :
+            ],
+            rf_spend=self.meridian_media_and_rf.rf_tensors.rf_spend[
+                ..., -15:, :
+            ],
+            revenue_per_kpi=self.meridian_media_and_rf.revenue_per_kpi[
+                ..., -15:
+            ],
+        ),
+    )
+    self.assertAllClose(
+        mroi,
+        tf.convert_to_tensor(test_utils.MROI_MEDIA_AND_RF_NEW_TIMES_DATA),
+        rtol=1e-3,
+        atol=1e-3,
+    )
 
-  def test_roi_wrong_media_spend_raises_exception(self):
+  def test_roi_wrong_new_data_dims_raises_exception(self):
     with self.assertRaisesWithLiteralMatch(
         ValueError,
-        "new_data.media_spend.shape: (5,) must match either (3,) or (5,"
-        " 49, 3).",
+        "New `media_spend` must have 1 or 3 dimensions. Found 2 dimensions.",
     ):
       self.analyzer_media_and_rf.roi(
           new_data=analyzer.DataTensors(
-              media_spend=self.meridian_media_and_rf.population
+              media_spend=tf.ones((_N_GEOS, _N_TIMES))
           ),
       )
 
-  def test_roi_wrong_reach_raises_exception(self):
+  def test_roi_wrong_new_data_geos_raises_exception(self):
     with self.assertRaisesRegex(
         ValueError,
-        "new_data.reach.shape must match reach.shape",
+        "New `media_spend` is expected to have 5 geos. Found 6 geos.",
     ):
       self.analyzer_media_and_rf.roi(
           new_data=analyzer.DataTensors(
-              reach=self.meridian_media_and_rf.population
+              media_spend=tf.ones((6, _N_MEDIA_TIMES, _N_MEDIA_CHANNELS))
           ),
       )
 
-  def test_roi_wrong_frequency_raises_exception(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "new_data.frequency.shape must match frequency.shape",
-    ):
-      self.analyzer_media_and_rf.roi(
-          new_data=analyzer.DataTensors(
-              frequency=self.meridian_media_and_rf.population
-          ),
-      )
-
-  def test_roi_wrong_rf_spend_raises_exception(self):
+  def test_roi_wrong_new_data_times_raises_exception(self):
     with self.assertRaisesWithLiteralMatch(
         ValueError,
-        "new_data.rf_spend.shape: (5,) must match either (2,) or (5, 49, 2).",
+        "If the time dimension of a variable in `new_data` is modified, then"
+        " all variables must be provided in `new_data`. The following variables"
+        " are missing: `['media', 'media_spend', 'reach', 'frequency',"
+        " 'revenue_per_kpi']`.",
     ):
       self.analyzer_media_and_rf.roi(
           new_data=analyzer.DataTensors(
-              rf_spend=self.meridian_media_and_rf.population
+              rf_spend=tf.ones((_N_GEOS, 10, _N_RF_CHANNELS))
           ),
+      )
+
+  def test_roi_wrong_new_data_channels_raises_exception(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "New `reach` is expected to have 2 channels. Found 3 channels.",
+    ):
+      self.analyzer_media_and_rf.roi(
+          new_data=analyzer.DataTensors(reach=tf.ones((_N_GEOS, _N_TIMES, 3))),
       )
 
   @parameterized.product(
@@ -861,6 +900,35 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
         self.analyzer_media_and_rf.incremental_outcome() / total_spend
     )
     self.assertAllClose(expected_roi, roi)
+
+  def test_roi_media_and_rf_new_params_returns_correct_shape(self):
+    model.Meridian.inference_data = mock.PropertyMock(
+        return_value=self.inference_data_media_and_rf
+    )
+    roi = self.analyzer_media_and_rf.roi(
+        new_data=analyzer.DataTensors(
+            media=self.meridian_media_and_rf.media_tensors.media[..., -15:, :],
+            media_spend=self.meridian_media_and_rf.media_tensors.media_spend[
+                ..., -15:, :
+            ],
+            reach=self.meridian_media_and_rf.rf_tensors.reach[..., -15:, :],
+            frequency=self.meridian_media_and_rf.rf_tensors.frequency[
+                ..., -15:, :
+            ],
+            rf_spend=self.meridian_media_and_rf.rf_tensors.rf_spend[
+                ..., -15:, :
+            ],
+            revenue_per_kpi=self.meridian_media_and_rf.revenue_per_kpi[
+                ..., -15:
+            ],
+        )
+    )
+    self.assertAllClose(
+        roi,
+        tf.convert_to_tensor(test_utils.ROI_NEW_TIMES_DATA),
+        rtol=1e-3,
+        atol=1e-3,
+    )
 
   @parameterized.product(
       use_posterior=[False, True],
@@ -1288,6 +1356,75 @@ class AnalyzerTest(tf.test.TestCase, parameterized.TestCase):
       self.assertNotIn(constants.EFFECTIVENESS, media_summary.data_vars)
       self.assertNotIn(constants.MROI, media_summary.data_vars)
       self.assertNotIn(constants.CPIK, media_summary.data_vars)
+
+  def test_summary_metrics_new_times_data_returns_correct_variables(self):
+    summary_metrics = self.analyzer_media_and_rf.summary_metrics(
+        new_data=analyzer.DataTensors(
+            media=self.meridian_media_and_rf.media_tensors.media[..., -15:, :],
+            media_spend=self.meridian_media_and_rf.media_tensors.media_spend[
+                ..., -15:, :
+            ],
+            reach=self.meridian_media_and_rf.rf_tensors.reach[..., -15:, :],
+            frequency=self.meridian_media_and_rf.rf_tensors.frequency[
+                ..., -15:, :
+            ],
+            rf_spend=self.meridian_media_and_rf.rf_tensors.rf_spend[
+                ..., -15:, :
+            ],
+            revenue_per_kpi=self.meridian_media_and_rf.revenue_per_kpi[
+                ..., -15:
+            ],
+        )
+    )
+    self.assertEqual(
+        list(summary_metrics.data_vars.keys()),
+        [
+            constants.IMPRESSIONS,
+            constants.PCT_OF_IMPRESSIONS,
+            constants.SPEND,
+            constants.PCT_OF_SPEND,
+            constants.CPM,
+            constants.INCREMENTAL_OUTCOME,
+            constants.ROI,
+            constants.EFFECTIVENESS,
+            constants.MROI,
+            constants.CPIK,
+        ],
+    )
+
+  def test_summary_metrics_new_times_data_aggregate_times_false(self):
+    summary_metrics = self.analyzer_media_and_rf.summary_metrics(
+        new_data=analyzer.DataTensors(
+            media=self.meridian_media_and_rf.media_tensors.media[..., -5:, :],
+            media_spend=self.meridian_media_and_rf.media_tensors.media_spend[
+                ..., -5:, :
+            ],
+            reach=self.meridian_media_and_rf.rf_tensors.reach[..., -5:, :],
+            frequency=self.meridian_media_and_rf.rf_tensors.frequency[
+                ..., -5:, :
+            ],
+            rf_spend=self.meridian_media_and_rf.rf_tensors.rf_spend[
+                ..., -5:, :
+            ],
+            revenue_per_kpi=self.meridian_media_and_rf.revenue_per_kpi[
+                ..., -5:
+            ],
+        ),
+        selected_times=[False, False, True, True, False],
+        aggregate_times=False,
+    )
+    self.assertEqual(list(summary_metrics.time), [2, 3])
+    self.assertEqual(
+        list(summary_metrics.data_vars.keys()),
+        [
+            "impressions",
+            "pct_of_impressions",
+            "spend",
+            "pct_of_spend",
+            "cpm",
+            "incremental_outcome",
+        ],
+    )
 
   @parameterized.product(
       aggregate_geos=[False, True],
@@ -2518,6 +2655,20 @@ class AnalyzerMediaOnlyTest(tf.test.TestCase, parameterized.TestCase):
       new_data_dict.pop(missing_param)
       self.analyzer_media_only.incremental_outcome(
           new_data=analyzer.DataTensors(**new_data_dict)
+      )
+
+  def test_incremental_outcome_media_only_invalid_new_data_raises_exception(
+      self,
+  ):
+    with self.assertRaisesRegex(
+        ValueError,
+        "New `reach` is not allowed because the input data to the Meridian"
+        " model does not contain `reach`",
+    ):
+      self.analyzer_media_only.incremental_outcome(
+          new_data=analyzer.DataTensors(
+              reach=tf.ones((_N_GEOS, 10, _N_RF_CHANNELS)),
+          )
       )
 
   @parameterized.product(
@@ -4047,7 +4198,7 @@ class AnalyzerNonMediaTest(tf.test.TestCase, parameterized.TestCase):
 
     # Assert that _compute_incremental_outcome_aggregate was called the right
     # number of times with the right arguments.
-    self.assertEqual(mock_compute_incremental_outcome_aggregate.call_count, 2)
+    self.assertEqual(mock_compute_incremental_outcome_aggregate.call_count, 4)
 
     # Both calls with include_non_paid_channels=True and given
     # non_media_baseline_values
@@ -4203,7 +4354,7 @@ class AnalyzerOrganicMediaTest(tf.test.TestCase, parameterized.TestCase):
     )
 
     if not new_tensors_names:
-      new_data = None
+      new_data = analyzer.DataTensors()
     else:
       tensors = {}
       for tensor_name in new_tensors_names:
@@ -4225,9 +4376,8 @@ class AnalyzerOrganicMediaTest(tf.test.TestCase, parameterized.TestCase):
     if require_revenue_per_kpi:
       required_tensors_names.append(constants.REVENUE_PER_KPI)
 
-    filled_tensors = self.analyzer_non_paid._fill_missing_data_tensors(
-        new_data=new_data,
-        required_tensors_names=required_tensors_names,
+    filled_tensors = new_data.validate_and_fill_missing_data(
+        required_tensors_names, self.meridian_non_paid
     )
     for tensor_name in required_tensors_names:
       if tensor_name in new_tensors_names:
@@ -4526,8 +4676,8 @@ class AnalyzerOrganicMediaTest(tf.test.TestCase, parameterized.TestCase):
         ValueError,
         "If the time dimension of any variable in `new_data` is modified, then"
         " all variables must be provided with the same number of time periods."
-        " `new_data.reach` has 10 time periods and does not match"
-        " `new_data.media` which has 52 time periods.",
+        " `media` has 52 time periods, which does not match the modified number"
+        " of time periods, 10.",
     ):
       self.analyzer_non_paid.incremental_outcome(
           new_data=analyzer.DataTensors(**new_data_dict)
